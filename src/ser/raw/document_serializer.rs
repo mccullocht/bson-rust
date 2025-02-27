@@ -1,4 +1,5 @@
-use bytes::BufMut;
+use std::io::Write;
+
 use serde::{ser::Impossible, Serialize};
 
 use crate::{
@@ -9,13 +10,13 @@ use crate::{
 use super::{Key, Serializer};
 
 /// Serializer used to serialize document or array bodies.
-pub(crate) struct DocumentSerializer<'a, B> {
-    root_serializer: &'a mut Serializer<B>,
+pub(crate) struct DocumentSerializer<'a, W> {
+    root_serializer: &'a mut Serializer<W>,
     num_keys_serialized: usize,
 }
 
-impl<'a, B: BufMut> DocumentSerializer<'a, B> {
-    pub(crate) fn start(rs: &'a mut Serializer<B>) -> crate::ser::Result<Self> {
+impl<'a, W: Write> DocumentSerializer<'a, W> {
+    pub(crate) fn start(rs: &'a mut Serializer<W>) -> crate::ser::Result<Self> {
         rs.write_next_len()?;
         Ok(Self {
             root_serializer: rs,
@@ -36,12 +37,12 @@ impl<'a, B: BufMut> DocumentSerializer<'a, B> {
     }
 
     pub(crate) fn end_doc(self) -> crate::ser::Result<()> {
-        self.root_serializer.buf.put_u8(0);
+        self.root_serializer.writer.write_all(&[0])?;
         Ok(())
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeSeq for DocumentSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeSeq for DocumentSerializer<'_, W> {
     type Ok = ();
     type Error = Error;
 
@@ -62,7 +63,7 @@ impl<B: BufMut> serde::ser::SerializeSeq for DocumentSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeMap for DocumentSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeMap for DocumentSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
@@ -88,7 +89,7 @@ impl<B: BufMut> serde::ser::SerializeMap for DocumentSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeStruct for DocumentSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeStruct for DocumentSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
@@ -108,7 +109,7 @@ impl<B: BufMut> serde::ser::SerializeStruct for DocumentSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeTuple for DocumentSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeTuple for DocumentSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
@@ -130,7 +131,7 @@ impl<B: BufMut> serde::ser::SerializeTuple for DocumentSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeTupleStruct for DocumentSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeTupleStruct for DocumentSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
@@ -152,17 +153,17 @@ impl<B: BufMut> serde::ser::SerializeTupleStruct for DocumentSerializer<'_, B> {
 
 /// Serializer used specifically for serializing document keys.
 /// Only keys that serialize to strings will be accepted.
-struct KeySerializer<'a, B> {
-    root_serializer: &'a mut Serializer<B>,
+struct KeySerializer<'a, W> {
+    root_serializer: &'a mut Serializer<W>,
 }
 
-impl<B> KeySerializer<'_, B> {
+impl<W> KeySerializer<'_, W> {
     fn invalid_key<T: Serialize>(v: T) -> Error {
         Error::InvalidDocumentKey(to_bson(&v).unwrap_or(Bson::Null))
     }
 }
 
-impl<B: BufMut> serde::Serializer for KeySerializer<'_, B> {
+impl<W: Write> serde::Serializer for KeySerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;

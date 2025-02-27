@@ -165,6 +165,7 @@ where
     to_buf_mut(value, |len| Vec::with_capacity(len))
 }
 
+// XXX maybe this should go away.
 #[inline]
 pub fn to_buf_mut<T, F, B>(value: &T, create: F) -> Result<B>
 where
@@ -183,7 +184,7 @@ where
     }
     let lens = len_serializer.into_lens();
     let buf = create(*lens.first().expect("root document must have length") as usize);
-    let mut serializer = raw::Serializer::new(buf, lens.into_iter());
+    let mut serializer = raw::Serializer::new(buf.writer(), lens.into_iter());
     #[cfg(feature = "serde_path_to_error")]
     {
         serde_path_to_error::serialize(value, &mut serializer).map_err(Error::with_path)?;
@@ -192,7 +193,35 @@ where
     {
         value.serialize(&mut serializer)?;
     }
-    Ok(serializer.into_buf())
+    Ok(serializer.into_writer().into_inner())
+}
+
+#[inline]
+pub fn to_writer<T, W>(value: &T, writer: &mut W) -> Result<()>
+where
+    T: Serialize,
+    W: Write,
+{
+    let mut len_serializer = raw::len_serializer::Serializer::new();
+    #[cfg(feature = "serde_path_to_error")]
+    {
+        serde_path_to_error::serialize(value, &mut len_serializer).map_err(Error::with_path)?;
+    }
+    #[cfg(not(feature = "serde_path_to_error"))]
+    {
+        value.serialize(&mut len_serializer)?;
+    }
+    let lens = len_serializer.into_lens();
+    let mut serializer = raw::Serializer::new(writer, lens.into_iter());
+    #[cfg(feature = "serde_path_to_error")]
+    {
+        serde_path_to_error::serialize(value, &mut serializer).map_err(Error::with_path)?;
+    }
+    #[cfg(not(feature = "serde_path_to_error"))]
+    {
+        value.serialize(&mut serializer)?;
+    }
+    Ok(())
 }
 
 /// Serialize the given `T` as a [`RawDocumentBuf`].

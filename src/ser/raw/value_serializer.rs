@@ -1,6 +1,5 @@
-use std::convert::TryFrom;
+use std::{convert::TryFrom, io::Write};
 
-use bytes::BufMut;
 use serde::{
     ser::{Error as SerdeError, Impossible, SerializeMap, SerializeStruct},
     Serialize,
@@ -19,8 +18,8 @@ use super::{document_serializer::DocumentSerializer, Serializer};
 
 /// A serializer used specifically for serializing the serde-data-model form of a BSON type (e.g.
 /// [`Binary`]) to raw bytes.
-pub(crate) struct ValueSerializer<'a, B> {
-    root_serializer: &'a mut Serializer<B>,
+pub(crate) struct ValueSerializer<'a, W> {
+    root_serializer: &'a mut Serializer<W>,
     state: SerializationStep,
 }
 
@@ -118,8 +117,8 @@ impl From<ValueType> for ElementType {
     }
 }
 
-impl<'a, B> ValueSerializer<'a, B> {
-    pub(super) fn new(rs: &'a mut Serializer<B>, value_type: ValueType) -> Self {
+impl<'a, W> ValueSerializer<'a, W> {
+    pub(super) fn new(rs: &'a mut Serializer<W>, value_type: ValueType) -> Self {
         let state = match value_type {
             ValueType::DateTime => SerializationStep::DateTime,
             ValueType::Binary => SerializationStep::Binary,
@@ -149,7 +148,7 @@ impl<'a, B> ValueSerializer<'a, B> {
     }
 }
 
-impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
+impl<'b, W: Write> serde::Serializer for &'b mut ValueSerializer<'_, W> {
     type Ok = ();
     type Error = Error;
 
@@ -157,7 +156,7 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
     type SerializeTuple = Impossible<(), Error>;
     type SerializeTupleStruct = Impossible<(), Error>;
     type SerializeTupleVariant = Impossible<(), Error>;
-    type SerializeMap = CodeWithScopeSerializer<'b, B>;
+    type SerializeMap = CodeWithScopeSerializer<'b, W>;
     type SerializeStruct = Self;
     type SerializeStructVariant = Impossible<(), Error>;
 
@@ -192,8 +191,12 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
                 let t = u32::try_from(time).map_err(Error::custom)?;
                 let i = u32::try_from(v).map_err(Error::custom)?;
 
-                self.root_serializer.buf.put_i32_le(i as i32);
-                self.root_serializer.buf.put_i32_le(t as i32);
+                self.root_serializer
+                    .writer
+                    .write_all(&(i as i32).to_le_bytes())?;
+                self.root_serializer
+                    .writer
+                    .write_all(&(t as i32).to_le_bytes())?;
                 Ok(())
             }
             _ => Err(self.invalid_step("i64")),
@@ -247,11 +250,13 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
         match &self.state {
             SerializationStep::DateTimeNumberLong => {
                 let millis: i64 = v.parse().map_err(Error::custom)?;
-                self.root_serializer.buf.put_i64_le(millis);
+                self.root_serializer
+                    .writer
+                    .write_all(&millis.to_le_bytes())?;
             }
             SerializationStep::Oid => {
                 let oid = ObjectId::parse_str(v).map_err(Error::custom)?;
-                self.root_serializer.buf.put_slice(&oid.bytes());
+                self.root_serializer.writer.write_all(&oid.bytes())?;
             }
             SerializationStep::BinaryBytes => {
                 self.state = SerializationStep::BinarySubType {
@@ -268,7 +273,7 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
                     .write_binary(bytes.as_slice(), subtype)?;
             }
             SerializationStep::Symbol | SerializationStep::DbPointerRef => {
-                self.root_serializer.write_string(v);
+                self.root_serializer.write_string(v)?;
             }
             SerializationStep::RegExPattern => {
                 self.root_serializer.write_cstring(v)?;
@@ -281,7 +286,7 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
                 self.root_serializer.write_cstring(sorted.as_str())?;
             }
             SerializationStep::Code => {
-                self.root_serializer.write_string(v);
+                self.root_serializer.write_string(v)?;
             }
             SerializationStep::CodeWithScopeCode => {
                 self.state = SerializationStep::CodeWithScopeScope {
@@ -303,7 +308,7 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok> {
         match self.state {
             SerializationStep::Decimal128Value => {
-                self.root_serializer.buf.put_slice(v);
+                self.root_serializer.writer.write_all(v)?;
                 Ok(())
             }
             SerializationStep::BinaryBytes => {
@@ -315,9 +320,11 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
                     code,
                     scope: RawDocument::from_bytes(v).map_err(Error::custom)?,
                 };
-                self.root_serializer.buf.put_i32_le(raw.len() as i32);
-                self.root_serializer.write_string(code);
-                self.root_serializer.buf.put_slice(v);
+                self.root_serializer
+                    .writer
+                    .write_all(&(raw.len() as i32).to_le_bytes())?;
+                self.root_serializer.write_string(code)?;
+                self.root_serializer.writer.write_all(v)?;
                 self.state = SerializationStep::Done;
                 Ok(())
             }
@@ -453,7 +460,7 @@ impl<'b, B: BufMut> serde::Serializer for &'b mut ValueSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> SerializeStruct for &mut ValueSerializer<'_, B> {
+impl<W: Write> SerializeStruct for &mut ValueSerializer<'_, W> {
     type Ok = ();
     type Error = Error;
 
@@ -583,22 +590,22 @@ impl<B: BufMut> SerializeStruct for &mut ValueSerializer<'_, B> {
     }
 }
 
-pub(crate) struct CodeWithScopeSerializer<'a, B> {
-    doc: DocumentSerializer<'a, B>,
+pub(crate) struct CodeWithScopeSerializer<'a, W> {
+    doc: DocumentSerializer<'a, W>,
 }
 
-impl<'a, B: BufMut> CodeWithScopeSerializer<'a, B> {
+impl<'a, W: Write> CodeWithScopeSerializer<'a, W> {
     #[inline]
-    fn start(code: &str, rs: &'a mut Serializer<B>) -> Result<Self> {
+    fn start(code: &str, rs: &'a mut Serializer<W>) -> Result<Self> {
         rs.write_next_len()?;
-        rs.write_string(code);
+        rs.write_string(code)?;
 
         let doc = DocumentSerializer::start(rs)?;
         Ok(Self { doc })
     }
 }
 
-impl<B: BufMut> SerializeMap for CodeWithScopeSerializer<'_, B> {
+impl<W: Write> SerializeMap for CodeWithScopeSerializer<'_, W> {
     type Ok = ();
     type Error = Error;
 

@@ -2,7 +2,8 @@ mod document_serializer;
 pub(super) mod len_serializer;
 mod value_serializer;
 
-use bytes::BufMut;
+use std::io::Write;
+
 use serde::{
     ser::{Error as SerdeError, SerializeMap, SerializeStruct},
     Serialize,
@@ -21,8 +22,8 @@ use crate::{
 use document_serializer::DocumentSerializer;
 
 /// Serializer used to convert a type `T` into raw BSON bytes.
-pub(crate) struct Serializer<B> {
-    buf: B,
+pub(crate) struct Serializer<W> {
+    writer: W,
 
     lens: std::vec::IntoIter<i32>,
     started: bool,
@@ -64,10 +65,10 @@ impl SerializerHint {
     }
 }
 
-impl<B: BufMut> Serializer<B> {
-    pub(crate) fn new(buf: B, lens: std::vec::IntoIter<i32>) -> Self {
+impl<W: Write> Serializer<W> {
+    pub(crate) fn new(writer: W, lens: std::vec::IntoIter<i32>) -> Self {
         Self {
-            buf,
+            writer,
             lens,
             started: false,
             next_key: None,
@@ -77,15 +78,15 @@ impl<B: BufMut> Serializer<B> {
     }
 
     /// Convert this serializer into the vec of the serialized bytes.
-    pub(crate) fn into_buf(self) -> B {
-        self.buf
+    pub(crate) fn into_writer(self) -> W {
+        self.writer
     }
 
     // XXX fix sig, this is not falliable.
     #[inline]
     fn write_next_len(&mut self) -> Result<()> {
-        self.buf
-            .put_i32_le(self.lens.next().expect("pre-recorded len"));
+        self.writer
+            .write_all(&self.lens.next().expect("pre-recorded len").to_le_bytes())?;
         self.started = true;
         Ok(())
     }
@@ -98,7 +99,7 @@ impl<B: BufMut> Serializer<B> {
     #[inline]
     fn write_key(&mut self, t: ElementType) -> Result<()> {
         if let Some(key) = self.next_key.take() {
-            self.buf.put_u8(t as u8);
+            self.writer.write_all(&[t as u8])?;
             match key {
                 Key::Static(k) => self.write_cstring(k),
                 Key::Owned(k) => self.write_cstring(&k),
@@ -122,16 +123,17 @@ impl<B: BufMut> Serializer<B> {
         if s.contains('\0') {
             return Err(Error::InvalidCString(s.into()));
         }
-        self.buf.put_slice(s.as_bytes());
-        self.buf.put_u8(0);
+        self.writer.write_all(s.as_bytes())?;
+        self.writer.write_all(&[0])?;
         Ok(())
     }
 
     #[inline]
-    fn write_string(&mut self, s: &str) {
-        self.buf.put_i32_le(s.len() as i32 + 1);
-        self.buf.put_slice(s.as_bytes());
-        self.buf.put_u8(0);
+    fn write_string(&mut self, s: &str) -> Result<()> {
+        self.writer.write_all(&(s.len() as i32 + 1).to_le_bytes())?;
+        self.writer.write_all(s.as_bytes())?;
+        self.writer.write_all(&[0])?;
+        Ok(())
     }
 
     #[inline]
@@ -149,29 +151,29 @@ impl<B: BufMut> Serializer<B> {
             )));
         }
 
-        self.buf.put_i32_le(len as i32);
-        self.buf.put_u8(subtype.into());
+        self.writer.write_all(&(len as i32).to_le_bytes())?;
+        self.writer.write_all(&[subtype.into()])?;
 
         if let BinarySubtype::BinaryOld = subtype {
-            self.buf.put_i32_le(len as i32 - 4);
+            self.writer.write_all(&(len as i32 - 4).to_le_bytes())?;
         };
 
-        self.buf.put_slice(bytes);
+        self.writer.write_all(bytes)?;
         Ok(())
     }
 }
 
-impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
+impl<'a, W: Write> serde::Serializer for &'a mut Serializer<W> {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = DocumentSerializer<'a, B>;
-    type SerializeTuple = DocumentSerializer<'a, B>;
-    type SerializeTupleStruct = DocumentSerializer<'a, B>;
-    type SerializeTupleVariant = VariantSerializer<'a, B>;
-    type SerializeMap = DocumentSerializer<'a, B>;
-    type SerializeStruct = StructSerializer<'a, B>;
-    type SerializeStructVariant = VariantSerializer<'a, B>;
+    type SerializeSeq = DocumentSerializer<'a, W>;
+    type SerializeTuple = DocumentSerializer<'a, W>;
+    type SerializeTupleStruct = DocumentSerializer<'a, W>;
+    type SerializeTupleVariant = VariantSerializer<'a, W>;
+    type SerializeMap = DocumentSerializer<'a, W>;
+    type SerializeStruct = StructSerializer<'a, W>;
+    type SerializeStructVariant = VariantSerializer<'a, W>;
 
     fn is_human_readable(&self) -> bool {
         self.human_readable
@@ -180,7 +182,7 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
     #[inline]
     fn serialize_bool(self, v: bool) -> Result<Self::Ok> {
         self.write_key(ElementType::Boolean)?;
-        self.buf.put_u8(v as u8);
+        self.writer.write_all(&[v as u8])?;
         Ok(())
     }
 
@@ -197,14 +199,14 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
     #[inline]
     fn serialize_i32(self, v: i32) -> Result<Self::Ok> {
         self.write_key(ElementType::Int32)?;
-        self.buf.put_i32_le(v);
+        self.writer.write_all(&v.to_le_bytes())?;
         Ok(())
     }
 
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<Self::Ok> {
         self.write_key(ElementType::Int64)?;
-        self.buf.put_i64_le(v);
+        self.writer.write_all(&v.to_le_bytes())?;
         Ok(())
     }
 
@@ -241,7 +243,7 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
     #[inline]
     fn serialize_f64(self, v: f64) -> Result<Self::Ok> {
         self.write_key(ElementType::Double)?;
-        self.buf.put_f64_le(v);
+        self.writer.write_all(&v.to_le_bytes())?;
         Ok(())
     }
 
@@ -255,7 +257,7 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
     #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok> {
         self.write_key(ElementType::String)?;
-        self.write_string(v);
+        self.write_string(v)?;
         Ok(())
     }
 
@@ -264,11 +266,11 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
         match self.hint.take() {
             SerializerHint::RawDocument => {
                 self.write_key(ElementType::EmbeddedDocument)?;
-                self.buf.put_slice(v);
+                self.writer.write_all(v)?;
             }
             SerializerHint::RawArray => {
                 self.write_key(ElementType::Array)?;
-                self.buf.put_slice(v);
+                self.writer.write_all(v)?;
             }
             hint => {
                 self.write_key(ElementType::Binary)?;
@@ -439,15 +441,15 @@ impl<'a, B: BufMut> serde::Serializer for &'a mut Serializer<B> {
     }
 }
 
-pub(crate) enum StructSerializer<'a, B> {
+pub(crate) enum StructSerializer<'a, W> {
     /// Serialize a BSON value currently represented in serde as a struct (e.g. ObjectId)
-    Value(ValueSerializer<'a, B>),
+    Value(ValueSerializer<'a, W>),
 
     /// Serialize the struct as a document.
-    Document(DocumentSerializer<'a, B>),
+    Document(DocumentSerializer<'a, W>),
 }
 
-impl<B: BufMut> SerializeStruct for StructSerializer<'_, B> {
+impl<W: Write> SerializeStruct for StructSerializer<'_, W> {
     type Ok = ();
     type Error = Error;
 
@@ -478,16 +480,16 @@ enum VariantInnerType {
 
 /// Serializer used for enum variants, including both tuple (e.g. Foo::Bar(1, 2, 3)) and
 /// struct (e.g. Foo::Bar { a: 1 }).
-pub(crate) struct VariantSerializer<'a, B> {
-    root_serializer: &'a mut Serializer<B>,
+pub(crate) struct VariantSerializer<'a, W> {
+    root_serializer: &'a mut Serializer<W>,
 
     /// How many elements have been serialized in the inner document / array so far.
     num_elements_serialized: usize,
 }
 
-impl<'a, B: BufMut> VariantSerializer<'a, B> {
+impl<'a, W: Write> VariantSerializer<'a, W> {
     fn start(
-        rs: &'a mut Serializer<B>,
+        rs: &'a mut Serializer<W>,
         variant: &'static str,
         inner_type: VariantInnerType,
     ) -> Result<Self> {
@@ -497,7 +499,7 @@ impl<'a, B: BufMut> VariantSerializer<'a, B> {
             VariantInnerType::Struct => ElementType::EmbeddedDocument,
             VariantInnerType::Tuple => ElementType::Array,
         };
-        rs.buf.put_u8(inner as u8);
+        rs.writer.write_all(&[inner as u8])?;
         rs.write_cstring(&variant)?;
         rs.write_next_len()?;
 
@@ -521,15 +523,13 @@ impl<'a, B: BufMut> VariantSerializer<'a, B> {
 
     #[inline]
     fn end_both(self) -> Result<()> {
-        // null byte for the inner
-        self.root_serializer.buf.put_u8(0);
-        // null byte for document
-        self.root_serializer.buf.put_u8(0);
+        // null byte for the inner and outer documents.
+        self.root_serializer.writer.write_all(&[0, 0])?;
         Ok(())
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeTupleVariant for VariantSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeTupleVariant for VariantSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
@@ -548,7 +548,7 @@ impl<B: BufMut> serde::ser::SerializeTupleVariant for VariantSerializer<'_, B> {
     }
 }
 
-impl<B: BufMut> serde::ser::SerializeStructVariant for VariantSerializer<'_, B> {
+impl<W: Write> serde::ser::SerializeStructVariant for VariantSerializer<'_, W> {
     type Ok = ();
 
     type Error = Error;
